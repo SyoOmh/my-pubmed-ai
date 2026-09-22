@@ -1,4 +1,4 @@
 streamlit
 requests
-pinecone-client
+pinecone
 openai
