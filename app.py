@@ -27,11 +27,20 @@ if openai_key and pinecone_key:
         keyword = st.text_input("輸入搜尋主題 (例如: Lung Cancer Target Therapy)")
         max_results = st.slider("預計撈取篇數", 5, 50, 10)
         
+        
         if st.button("開始搜尋並存入雲端"):
             with st.spinner("正在從 PubMed 抓取資料並轉換向量..."):
-                # A. 呼叫免費的 PubMed API 取得文章 ID
-                search_url = f"https://nih.gov{keyword}&retmax={max_results}&retmode=json"
-                id_list = requests.get(search_url).json()["esearchresult"]["idlist"]
+                # 修正後的正確官方網址格式（加入關鍵字並避免空格出錯）
+                import urllib.parse
+                safe_keyword = urllib.parse.quote(keyword.strip())
+                search_url = f"https://nih.gov{safe_keyword}&retmax={max_results}&retmode=json"
+                
+                # 執行抓取
+                try:
+                    id_list = requests.get(search_url).json()["esearchresult"]["idlist"]
+                    st.success(f"成功撈取到 {len(id_list)} 篇文獻 ID！")
+                except Exception as e:
+                    st.error(f"連線失敗，請檢查網址或稍後再試。錯誤原因: {e}")
                 
                 # B. 根據 ID 抓取標題與摘要
                 fetch_url = f"https://nih.gov{','.join(id_list)}&retmode=xml"
