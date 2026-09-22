@@ -159,7 +159,20 @@ if openai_key and pinecone_key:
         if st.session_state.fetched_articles:
             st.markdown("### 📄 搜尋結果（請勾選要存入雲端的文獻）")
 
-            select_all = st.checkbox("全選 / 全不選", value=True, key="select_all")
+            def _apply_select_all():
+                # 「全選/全不選」被點擊時，直接覆寫每一篇文章勾選框在 session_state 裡的值，
+                # 這樣下一次重新整理時，各個勾選框才會真的跟著變動
+                # （單純傳 value= 參數沒用，因為這些勾選框已經有 key，Streamlit 會優先讀 session_state）
+                new_value = st.session_state.select_all
+                for art in st.session_state.fetched_articles:
+                    st.session_state[f"select_{art['pmid']}"] = new_value
+
+            st.checkbox(
+                "全選 / 全不選",
+                value=True,
+                key="select_all",
+                on_change=_apply_select_all,
+            )
 
             for art in st.session_state.fetched_articles:
                 type_badges = " ".join(f"`{t}`" for t in art["pub_types"])
@@ -167,7 +180,7 @@ if openai_key and pinecone_key:
                 with col_check:
                     st.checkbox(
                         "選取",
-                        value=select_all,
+                        value=True,  # 只在該篇文章第一次出現、還沒有 session_state 值時生效
                         key=f"select_{art['pmid']}",
                         label_visibility="collapsed",
                     )
