@@ -25,7 +25,7 @@ if openai_key and pinecone_key:
     tab1, tab2 = st.tabs(["🔍 搜尋並存入雲端", "💬 文獻庫問答 (RAG)"])
 
     with tab1:
-        st.subheader("從 PubMed 撈取並同步至雲端庫")
+        st.subheader("從 PubMed 搜尋文獻")
         keyword = st.text_input("輸入搜尋主題 (例如: Lung Cancer Target Therapy)")
         max_results = st.slider("預計撈取篇數上限", 5, 50, 10)
 
@@ -40,20 +40,22 @@ if openai_key and pinecone_key:
                 "結束日期", value=datetime.date.today(), key="end_date"
             )
 
-        if st.button("開始搜尋並存入雲端"):
+        # 用 session_state 保存搜尋結果，這樣使用者勾選文章、按下存入按鈕造成頁面重新整理時，
+        # 搜尋結果不會消失（不需要重新打 PubMed API）
+        if "fetched_articles" not in st.session_state:
+            st.session_state.fetched_articles = []
+
+        if st.button("開始搜尋"):
             if not keyword.strip():
                 st.warning("請先輸入搜尋主題！")
             elif start_date > end_date:
                 st.warning("起始日期不能晚於結束日期，請重新選擇！")
             else:
-                with st.spinner("正在從 PubMed 抓取資料並轉換向量..."):
+                with st.spinner("正在從 PubMed 抓取資料..."):
                     # 1. 安全地對關鍵字進行網址編碼
                     safe_keyword = urllib.parse.quote(keyword.strip())
 
                     # 2. 正確的官方 PubMed eSearch API 網址
-                    # 原本的程式碼寫成 "https://nih.gov{safe_keyword}..."，
-                    # 這會把整段查詢字串當成主機名稱，導致 DNS 解析失敗。
-                    # 正確的 base URL 是 NCBI eutils 的 esearch.fcgi
                     # mindate / maxdate + datetype=pdat 用來依「發表日期」篩選區間
                     search_url = (
                         "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
@@ -70,6 +72,7 @@ if openai_key and pinecone_key:
                         id_list = search_res.json()["esearchresult"]["idlist"]
 
                         if not id_list:
+                            st.session_state.fetched_articles = []
                             st.info("在此日期區間內，找不到符合該關鍵字的文獻。")
                         else:
                             # 找到幾篇就是幾篇，不會、也不需要強迫湊到篇數上限
@@ -96,8 +99,9 @@ if openai_key and pinecone_key:
                             response.raise_for_status()
                             root = ET.fromstring(response.content)
 
-                            saved_count = 0
-                            # 開始解析文獻並寫入雲端
+                            fetched_articles = []  # 只做搜尋、解析，這裡不呼叫 embedding、也不存 Pinecone
+
+                            # 解析每篇文獻的標題、摘要、年份、研究類型
                             for article in root.findall(".//PubmedArticle"):
                                 pmid_el = article.find(".//PMID")
                                 if pmid_el is None:
@@ -115,32 +119,108 @@ if openai_key and pinecone_key:
                                 if not abstract:
                                     abstract = "No abstract available"
 
-                                full_text = f"Title: {title}\nAbstract: {abstract}"
+                                # 解析研究年份（優先用 PubDate/Year，找不到時退而求其次用 MedlineDate）
+                                year = "年份未知"
+                                year_el = article.find(".//JournalIssue/PubDate/Year")
+                                if year_el is not None and year_el.text:
+                                    year = year_el.text
+                                else:
+                                    medline_date_el = article.find(".//JournalIssue/PubDate/MedlineDate")
+                                    if medline_date_el is not None and medline_date_el.text:
+                                        year = medline_date_el.text[:4]  # 取前 4 碼當作年份
 
-                                # C. 使用 OpenAI 將文字轉為向量
-                                emb_res = client.embeddings.create(
-                                    input=full_text, model="text-embedding-3-small"
+                                # 解析研究類型（一篇文獻可能有多個 PublicationType）
+                                pub_types = [
+                                    el.text
+                                    for el in article.findall(".//PublicationTypeList/PublicationType")
+                                    if el.text
+                                ]
+                                if not pub_types:
+                                    pub_types = ["未標註類型"]
+
+                                fetched_articles.append(
+                                    {
+                                        "pmid": pmid,
+                                        "title": title,
+                                        "abstract": abstract,
+                                        "year": year,
+                                        "pub_types": pub_types,
+                                    }
                                 )
-                                embedding = emb_res.data[0].embedding  # data 是 list，要取第一筆
 
-                                # D. 存入 Pinecone 雲端向量庫
-                                index.upsert(
-                                    vectors=[
-                                        {
-                                            "id": pmid,
-                                            "values": embedding,
-                                            "metadata": {"title": title, "abstract": abstract},
-                                        }
-                                    ]
-                                )
-                                saved_count += 1
-
-                            st.success(f"成功將 {saved_count} 篇文獻永久同步至您的 Pinecone 雲端庫！")
+                            st.session_state.fetched_articles = fetched_articles
 
                     except requests.exceptions.RequestException as e:
                         st.error(f"連線 PubMed 失敗，請稍後再試。錯誤原因: {e}")
                     except Exception as e:
                         st.error(f"系統執行失敗，請檢查 API Key 或稍後再試。錯誤原因: {e}")
+
+        # ---- 顯示搜尋結果，讓使用者自己勾選要存入雲端的文章 ----
+        if st.session_state.fetched_articles:
+            st.markdown("### 📄 搜尋結果（請勾選要存入雲端的文獻）")
+
+            select_all = st.checkbox("全選 / 全不選", value=True, key="select_all")
+
+            for art in st.session_state.fetched_articles:
+                type_badges = " ".join(f"`{t}`" for t in art["pub_types"])
+                col_check, col_info = st.columns([1, 9])
+                with col_check:
+                    st.checkbox(
+                        "選取",
+                        value=select_all,
+                        key=f"select_{art['pmid']}",
+                        label_visibility="collapsed",
+                    )
+                with col_info:
+                    st.markdown(
+                        f"**{art['title']}**  \n"
+                        f"🗓️ `{art['year']}` &nbsp;&nbsp; 🧪 {type_badges} &nbsp;&nbsp; "
+                        f"[PMID: {art['pmid']}](https://pubmed.ncbi.nlm.nih.gov/{art['pmid']}/)"
+                    )
+                st.divider()
+
+            if st.button("☁️ 將勾選的文獻存入 Pinecone 雲端"):
+                selected_articles = [
+                    art
+                    for art in st.session_state.fetched_articles
+                    if st.session_state.get(f"select_{art['pmid']}", False)
+                ]
+
+                if not selected_articles:
+                    st.warning("您尚未勾選任何文獻，請至少選擇一篇再存入。")
+                else:
+                    with st.spinner(f"正在將 {len(selected_articles)} 篇文獻轉換向量並存入雲端..."):
+                        try:
+                            saved_count = 0
+                            for art in selected_articles:
+                                full_text = f"Title: {art['title']}\nAbstract: {art['abstract']}"
+
+                                # 使用 OpenAI 將文字轉為向量（只針對使用者勾選的文章才呼叫，節省費用）
+                                emb_res = client.embeddings.create(
+                                    input=full_text, model="text-embedding-3-small"
+                                )
+                                embedding = emb_res.data[0].embedding
+
+                                # 存入 Pinecone 雲端向量庫
+                                index.upsert(
+                                    vectors=[
+                                        {
+                                            "id": art["pmid"],
+                                            "values": embedding,
+                                            "metadata": {
+                                                "title": art["title"],
+                                                "abstract": art["abstract"],
+                                                "year": art["year"],
+                                                "pub_types": ", ".join(art["pub_types"]),
+                                            },
+                                        }
+                                    ]
+                                )
+                                saved_count += 1
+
+                            st.success(f"成功將 {saved_count} 篇文獻存入您的 Pinecone 雲端庫！")
+                        except Exception as e:
+                            st.error(f"存入雲端失敗，請檢查 API Key 或稍後再試。錯誤原因: {e}")
 
     with tab2:
         st.subheader("對著您的個人文獻庫提問")
