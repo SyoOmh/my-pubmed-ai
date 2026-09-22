@@ -48,7 +48,7 @@ if openai_key and pinecone_key:
                         else:
                             st.success(f"成功撈取到 {len(id_list)} 篇文獻 ID！")
                             
-                            # 3. 正確的官方 PubMed eFetch API 網址 (將 nih.gov 修正)
+                            # 3. 正確的官方 PubMed eFetch API 網址
                             ids_str = ",".join(id_list)
                             fetch_url = f"https://nih.gov{ids_str}&retmode=xml"
                             
@@ -68,7 +68,7 @@ if openai_key and pinecone_key:
                                 
                                 # C. 使用 OpenAI 將文字轉為向量
                                 emb_res = client.embeddings.create(input=full_text, model="text-embedding-3-small")
-                                embedding = emb_res.data[0].embedding
+                                embedding = emb_res.data.embedding
                                 
                                 # D. 存入 Pinecone 雲端向量庫
                                 index.upsert(vectors=[(pmid, embedding, {"title": title, "abstract": abstract})])
@@ -89,7 +89,7 @@ if openai_key and pinecone_key:
                 with st.spinner("正在檢索雲端文獻並生成解答..."):
                     try:
                         # A. 將使用者的提問也轉成向量
-                        q_emb = client.embeddings.create(input=user_question, model="text-embedding-3-small").data[0].embedding
+                        q_emb = client.embeddings.create(input=user_question, model="text-embedding-3-small").data.embedding
                         
                         # B. 去 Pinecone 資料庫搜尋最相關的前 5 篇論文
                         res = index.query(vector=q_emb, top_k=5, include_metadata=True)
@@ -110,7 +110,7 @@ if openai_key and pinecone_key:
                                 ]
                             )
                             st.write("### AI 的解答：")
-                            st.write(ai_res.choices[0].message.content)
+                            st.write(ai_res.choices.message.content)
                         else:
                             st.warning("您的 Pinecone 雲端庫中目前沒有相關文獻，請先至 Tab 1 撈取文獻。")
                             
